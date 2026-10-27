@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 import core
-from themes import DISPLAY, T, THEME_LABELS, activate_theme, build_style
+from themes import DISPLAY, T, THEME_LABELS, activate_theme, build_style, build_dialog_style
 
 APP_NAME = "Topneah Video APP"
 VIDEO_EXT = (".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".ts")
@@ -173,6 +173,25 @@ def icon_pixmap(kind: str, size: int = 28, color: str = T["amber"]) -> QPixmap:
 def video_drop_paths(mime) -> list[str]:
     return [url.toLocalFile() for url in mime.urls()
             if url.isLocalFile() and url.toLocalFile().lower().endswith(VIDEO_EXT)]
+
+
+class ResizeHandle(QWidget):
+    """Explicit resize targets for frameless-window edges and corners."""
+
+    def __init__(self, window, edges, cursor):
+        super().__init__(window)
+        self.edges = edges
+        self.setCursor(cursor)
+        self.setMouseTracking(True)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            handle = self.window().windowHandle()
+            if handle is not None:
+                handle.startSystemResize(self.edges)
+            event.accept()
+        else:
+            super().mousePressEvent(event)
 
 
 class FullscreenPreview(QWidget):
@@ -792,8 +811,8 @@ class MainWindow(QWidget):
         self.btn_add = with_icon(QPushButton("  Guardar este trecho"), "plus", T["amber2"])
         self.btn_add.setObjectName("outline")
         self.btn_add.clicked.connect(self.add_segment)
-        caption = QLabel("Atalhos:  Espaço = play/pause  |  I = início  |  O = fim  |  Enter = guardar  |  "
-                         "← → = quadro a quadro  |  Shift + ← → = 1 segundo")
+        caption = QLabel("Atalhos:  Espaço = play/pause  |  Q = início  |  E = fim  |  W / Enter = guardar  |  "
+                         "A / D = 1 segundo  |  Shift + A / D = quadro a quadro")
         caption.setObjectName("caption")
 
         controls = QFrame()
@@ -855,7 +874,12 @@ class MainWindow(QWidget):
         self.btn_remove.setObjectName("danger")
         self.btn_remove.clicked.connect(self.remove_segments)
 
-        c1, l1 = self.card("1", "Seus trechos", "Arraste para ordenar")
+        c1, l1 = self.card("1", "Seus trechos")
+        self.lbl_segments_total = QLabel("Total: 00:00.000")
+        self.lbl_segments_total.setObjectName("caption")
+        self.lbl_segments_total.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.lbl_segments_total.setToolTip("Duração total de todos os recortes da lista")
+        l1.itemAt(0).layout().addWidget(self.lbl_segments_total)
         l1.addWidget(self.cmb_videos)
         l1.addWidget(self.list_segs, 1)
         rr = QHBoxLayout()
@@ -964,7 +988,7 @@ class MainWindow(QWidget):
         self.lbl_status = QLabel("Pronto.")
         self.lbl_status.setObjectName("caption")
         self.lbl_status.setWordWrap(True)
-        self.btn_start = with_icon(QPushButton("  INICIAR SALVAMENTO"), "download", T["on_amber"], 24)
+        self.btn_start = with_icon(QPushButton("  PROCESSAR"), "download", T["on_amber"], 24)
         self.btn_start.setObjectName("primary")
         self.btn_start.setProperty("big", True)
         self.btn_start.setStyleSheet(f"font-family:{DISPLAY}; font-size:12px; letter-spacing:0px; padding:7px 12px;")
@@ -1036,13 +1060,14 @@ class MainWindow(QWidget):
             s.setContext(Qt.ApplicationShortcut)
             s.activated.connect(fn)
         sc(Qt.Key_Space, self.toggle_play)
-        sc(Qt.Key_I, lambda: self.set_in(self.pos()))
-        sc(Qt.Key_O, lambda: self.set_out(self.pos()))
+        sc(Qt.Key_Q, lambda: self.set_in(self.pos()))
+        sc(Qt.Key_E, lambda: self.set_out(self.pos()))
         sc(Qt.Key_Return, self.add_segment)
-        sc(Qt.Key_Left, lambda: self.step(-1))
-        sc(Qt.Key_Right, lambda: self.step(1))
-        sc("Shift+Left", lambda: self.step(-60))
-        sc("Shift+Right", lambda: self.step(60))
+        sc(Qt.Key_W, self.add_segment)
+        sc(Qt.Key_A, lambda: self.step(-1, seconds=True))
+        sc(Qt.Key_D, lambda: self.step(1, seconds=True))
+        sc("Shift+A", lambda: self.step(-1))
+        sc("Shift+D", lambda: self.step(1))
         for b in (self.btn_in, self.btn_out, self.btn_add, self.btn_view):
             b.setFocusPolicy(Qt.NoFocus)
 
@@ -1055,6 +1080,17 @@ class MainWindow(QWidget):
         self.gpu_probe = GpuProbe()
         self.gpu_probe.ready.connect(self.on_gpu)
         self.gpu_probe.start()
+        self.resize_handles = [
+            ResizeHandle(self, edges, cursor) for edges, cursor in (
+                (Qt.LeftEdge, Qt.SizeHorCursor), (Qt.RightEdge, Qt.SizeHorCursor),
+                (Qt.TopEdge, Qt.SizeVerCursor), (Qt.BottomEdge, Qt.SizeVerCursor),
+                (Qt.TopEdge | Qt.LeftEdge, Qt.SizeFDiagCursor),
+                (Qt.TopEdge | Qt.RightEdge, Qt.SizeBDiagCursor),
+                (Qt.BottomEdge | Qt.LeftEdge, Qt.SizeBDiagCursor),
+                (Qt.BottomEdge | Qt.RightEdge, Qt.SizeFDiagCursor),
+            )
+        ]
+        self.update_resize_handles()
         self.update_buttons()
 
     def apply_theme(self, theme):
@@ -1094,30 +1130,31 @@ class MainWindow(QWidget):
         super().changeEvent(event)
         if event.type() == QEvent.WindowStateChange and hasattr(self, "title_bar"):
             self.title_bar.sync_state()
+            self.update_resize_handles()
 
-    def nativeEvent(self, event_type, message):
-        # Native hit testing retains edge/corner resizing for the frameless HWND.
-        if sys.platform == "win32" and not self.isMaximized() and not self.isFullScreen():
-            import ctypes
-            from ctypes import wintypes
-            msg = wintypes.MSG.from_address(int(message))
-            if msg.message == 0x0084:  # WM_NCHITTEST
-                rect = wintypes.RECT()
-                user32 = ctypes.windll.user32
-                user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
-                user32.GetWindowRect.restype = wintypes.BOOL
-                if user32.GetWindowRect(msg.hWnd, ctypes.byref(rect)):
-                    x = ctypes.c_short(msg.lParam & 0xffff).value
-                    y = ctypes.c_short((msg.lParam >> 16) & 0xffff).value
-                    border = max(5, round(6 * self.devicePixelRatioF()))
-                    left, right = x < rect.left + border, x >= rect.right - border
-                    top, bottom = y < rect.top + border, y >= rect.bottom - border
-                    hit = (13 if left else 14 if right else 12) if top else (
-                        (16 if left else 17 if right else 15) if bottom else (
-                            10 if left else 11 if right else 0))
-                    if hit:
-                        return True, hit
-        return super().nativeEvent(event_type, message)
+    def update_resize_handles(self):
+        if not hasattr(self, "resize_handles"):
+            return
+        width, height = self.width(), self.height()
+        edge, corner = 6, 12
+        bounds = (
+            (0, corner, edge, max(0, height - 2 * corner)),
+            (width - edge, corner, edge, max(0, height - 2 * corner)),
+            (corner, 0, max(0, width - 2 * corner), edge),
+            (corner, height - edge, max(0, width - 2 * corner), edge),
+            (0, 0, corner, corner), (width - corner, 0, corner, corner),
+            (0, height - corner, corner, corner),
+            (width - corner, height - corner, corner, corner),
+        )
+        visible = not self.isMaximized() and not self.isFullScreen()
+        for handle, geometry in zip(self.resize_handles, bounds):
+            handle.setGeometry(*geometry)
+            handle.setVisible(visible)
+            handle.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_resize_handles()
 
     # ------------------------------------------------------------ montagem
     def card(self, num: str, title: str, sub: str = ""):
@@ -1389,16 +1426,18 @@ class MainWindow(QWidget):
             msg = "Comece abrindo um vídeo: arraste o arquivo para a janela."
         elif self.t_in is None and not self.segments():
             msg = ("<b>Passo 1:</b> ache o começo do pedaço que você quer "
-                   "(clique na barra ou use as setas) e aperte <b>I</b>.")
+                   "(clique na barra ou use A/D) e aperte <b>Q</b>.")
         elif self.t_in is None:
             msg = "Trecho guardado! Marque outro com <b>I</b> e <b>O</b>, ou escolha a qualidade e salve à direita."
         elif self.t_out is None:
-            msg = "<b>Passo 2:</b> agora ache o fim do pedaço e aperte <b>O</b>."
+            msg = "<b>Passo 2:</b> agora ache o fim do pedaço e aperte <b>E</b>."
         else:
-            msg = "<b>Passo 3:</b> aperte <b>Enter</b> para guardar este trecho. Depois você pode marcar outros."
+            msg = "<b>Passo 3:</b> aperte <b>W</b> ou <b>Enter</b> para guardar este trecho. Depois você pode marcar outros."
         self.lbl_hint.setText(msg)
 
     def update_buttons(self):
+        total = sum(segment["end"] - segment["start"] for segment in self.segments())
+        self.lbl_segments_total.setText(f"Total: {fmt_t(total)}")
         self.update_hint()
         self.update_summary()
         have = self.cur is not None
@@ -1512,11 +1551,11 @@ class MainWindow(QWidget):
     def seek(self, t: float):
         self.player.setPosition(int(max(0, min(t, self.duration())) * 1000))
 
-    def step(self, n: int):
+    def step(self, n: int, *, seconds: bool = False):
         if not self.cur:
             return
         self.player.pause()
-        self.seek(self.pos() + n / self.fps())
+        self.seek(self.pos() + (n if seconds else n / self.fps()))
 
     def on_position(self, ms: int):
         t = ms / 1000.0
@@ -1656,6 +1695,33 @@ class MainWindow(QWidget):
         else:
             self.export_cuts()
 
+    def show_export_result(self, message: str, ok: bool, open_folder: str | None):
+        dialog = QMessageBox(self)
+        dialog.setOption(QMessageBox.Option.DontUseNativeDialog, True)
+        dialog.setWindowFlag(Qt.FramelessWindowHint, True)
+        dialog.setWindowTitle(APP_NAME)
+        dialog.setTextFormat(Qt.PlainText)
+        dialog.setText("Salvamento concluído" if ok else "Não foi possível salvar")
+        dialog.setInformativeText(message)
+        dialog.setStyleSheet(build_dialog_style(self.theme))
+        if ok and open_folder:
+            dialog.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            dialog.button(QMessageBox.Yes).setText("Abrir pasta")
+            dialog.button(QMessageBox.Yes).setObjectName("primary")
+            dialog.button(QMessageBox.No).setText("Fechar")
+            dialog.setDefaultButton(QMessageBox.No)
+            dialog.setEscapeButton(QMessageBox.No)
+        else:
+            dialog.setStandardButtons(QMessageBox.Ok)
+            dialog.button(QMessageBox.Ok).setText("Fechar")
+            dialog.setEscapeButton(QMessageBox.Ok)
+        for label in dialog.findChildren(QLabel):
+            label.setWordWrap(True)
+        result = dialog.exec()
+        dialog.deleteLater()
+        if ok and open_folder and result == QMessageBox.Yes:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(open_folder))
+
     def run_job(self, job, label: str, open_folder: str | None):
         if self.busy():
             return
@@ -1672,11 +1738,7 @@ class MainWindow(QWidget):
             if ok:
                 self.progress.setValue(1000)
             self.update_buttons()
-            if ok and open_folder and QMessageBox.question(
-                    self, APP_NAME, msg + "\n\nAbrir a pasta?") == QMessageBox.Yes:
-                QDesktopServices.openUrl(QUrl.fromLocalFile(open_folder))
-            elif not ok:
-                QMessageBox.warning(self, APP_NAME, msg)
+            self.show_export_result(msg, ok, open_folder)
 
         w.done.connect(lambda m: finish(m, True))
         w.failed.connect(lambda m: finish(m, False))
