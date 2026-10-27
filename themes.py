@@ -135,7 +135,7 @@ QToolTip {{ background: {t['panel2']}; color: {t['text']}; border: 1px solid {t[
 """
 
 
-def build_style(theme="dark") -> str:
+def _build_theme_style(theme="dark") -> str:
     style = build_base_style()
     if theme == "light":
         for old, new in {
@@ -284,3 +284,17 @@ def activate_theme(theme: str) -> str:
     T.clear()
     T.update(THEMES[theme])
     return theme
+
+
+def build_style(theme="dark") -> str:
+    """Apply compact sidebar typography consistently across every theme."""
+    return _build_theme_style(theme) + """
+QWidget#sidebar QWidget { font-size: 12px; }
+QWidget#sidebar QLabel#sectionTitle { font-size: 13px; }
+QWidget#sidebar QLabel#num { font-size: 12px; }
+QWidget#sidebar QLabel#caption { font-size: 10px; }
+QWidget#sidebar QLabel#h { font-size: 10px; }
+QWidget#sidebar QPushButton { padding-top: 7px; padding-bottom: 7px; }
+QWidget#sidebar QComboBox { padding-top: 5px; padding-bottom: 5px; }
+QWidget#sidebar QLabel#summary { padding: 7px 10px; }
+"""

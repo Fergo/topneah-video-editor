@@ -175,6 +175,36 @@ def video_drop_paths(mime) -> list[str]:
             if url.isLocalFile() and url.toLocalFile().lower().endswith(VIDEO_EXT)]
 
 
+class FullscreenPreview(QWidget):
+    """Independent layout so the editor cannot constrain fullscreen video."""
+
+    def __init__(self, video):
+        super().__init__(video.window(), Qt.Window | Qt.FramelessWindowHint)
+        self.video = video
+        self.original_parent = video.parentWidget()
+        self.original_layout = self.original_parent.layout()
+        self.original_index = self.original_layout.indexOf(video)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setStyleSheet("background: black;")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.original_layout.removeWidget(video)
+        layout.addWidget(video)
+        self.exit_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        self.exit_shortcut.activated.connect(self.close)
+        video.show()
+
+    def closeEvent(self, event):
+        self.layout().removeWidget(self.video)
+        self.video.setParent(self.original_parent)
+        self.original_layout.insertWidget(self.original_index, self.video)
+        self.video.fullscreen_window = None
+        self.video.show()
+        self.original_parent.window().activateWindow()
+        event.accept()
+
+
 class VideoPreview(QVideoWidget):
     """Handle file drops on the native video surface, including fullscreen."""
     filesDropped = Signal(list)
@@ -182,6 +212,33 @@ class VideoPreview(QVideoWidget):
     def __init__(self):
         super().__init__()
         self.setAcceptDrops(True)
+        self.fullscreen_window = None
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setAspectRatioMode(Qt.KeepAspectRatio)
+
+    def toggle_fullscreen(self):
+        if self.fullscreen_window is not None:
+            self.fullscreen_window.close()
+            return
+        self.fullscreen_window = FullscreenPreview(self)
+        self.fullscreen_window.showFullScreen()
+        self.fullscreen_window.activateWindow()
+        self.setFocus()
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.toggle_fullscreen()
+            event.accept()
+        else:
+            super().mouseDoubleClickEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape and self.fullscreen_window is not None:
+            self.fullscreen_window.close()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
 
     def dragEnterEvent(self, event):
         if video_drop_paths(event.mimeData()):
@@ -206,7 +263,7 @@ class Timeline(QWidget):
     seekRequested = Signal(float)
     inChanged = Signal(float)
     outChanged = Signal(float)
-    PAD = 12
+    PAD = 0
 
     def __init__(self):
         super().__init__()
@@ -221,40 +278,50 @@ class Timeline(QWidget):
         self._drag: str | None = None
 
     def _x(self, t: float) -> float:
-        w = self.width() - 2 * self.PAD
+        w = max(0, self.width() - 1 - 2 * self.PAD)
         return self.PAD + (t / self.duration * w if self.duration else 0)
 
     def _t(self, x: float) -> float:
-        w = self.width() - 2 * self.PAD
+        w = max(0, self.width() - 1 - 2 * self.PAD)
         return min(max((x - self.PAD) / w, 0), 1) * self.duration if w > 0 else 0
+
+    def tick_times(self) -> list[float]:
+        """Choose readable ruler spacing independently of source keyframes."""
+        width = max(0, self.width() - 1 - 2 * self.PAD)
+        if self.duration <= 0 or width <= 0:
+            return []
+        minimum = self.duration * 18 / width
+        magnitude = 10 ** math.floor(math.log10(minimum))
+        step = next(value * magnitude for value in (1, 2, 5, 10)
+                    if value * magnitude >= minimum)
+        return [i * step for i in range(1, math.ceil(self.duration / step))]
 
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        bar = QRectF(self.PAD, 26, self.width() - 2 * self.PAD, 28)
-        p.setPen(QPen(QColor("#2B2B30"), 1))
+        bar = QRectF(self.PAD, 26, max(0, self.width() - 1 - 2 * self.PAD), 28)
+        p.setPen(QPen(QColor(T["line"]), 1))
         p.setBrush(QColor(T["track"]))
-        p.drawRoundedRect(bar, T.get("corner_radius", 0 if T["bg"] == "#C0C0C0" else 9), T.get("corner_radius", 0 if T["bg"] == "#C0C0C0" else 9))
+        p.drawRect(bar)
         if self.duration <= 0:
             return
-        p.setPen(QPen(QColor(T["tick"]), 1))
-        if len(self.kf) < 700:
-            for k in self.kf:
-                x = self._x(k)
-                p.drawLine(int(x), 47, int(x), 53)
         acc = QColor(T["amber"])
         p.setPen(Qt.NoPen)
         soft = QColor(acc)
         soft.setAlpha(90)
         p.setBrush(soft)
         for a, b in self.segments:
-            p.drawRoundedRect(QRectF(self._x(a), 26, max(3, self._x(b) - self._x(a)), 28), 6, 6)
+            p.drawRect(QRectF(self._x(a), 26, max(3, self._x(b) - self._x(a)), 28))
         if self.t_in is not None and self.t_out is not None and self.t_out > self.t_in:
             g = QLinearGradient(0, 26, 0, 54)
             g.setColorAt(0, QColor(T["amber2"]))
             g.setColorAt(1, QColor(T["amber_dark"]))
             p.setBrush(QBrush(g))
-            p.drawRoundedRect(QRectF(self._x(self.t_in), 26, self._x(self.t_out) - self._x(self.t_in), 28), 6, 6)
+            p.drawRect(QRectF(self._x(self.t_in), 26, self._x(self.t_out) - self._x(self.t_in), 28))
+        p.setPen(QPen(QColor(T["tick"]), 1))
+        for tick in self.tick_times():
+            x = self._x(tick)
+            p.drawLine(QPointF(x, 47), QPointF(x, 53))
         for t, col in ((self.t_in, T["in_col"]), (self.t_out, T["out_col"])):
             if t is not None:
                 x = self._x(t)
@@ -266,8 +333,9 @@ class Timeline(QWidget):
         p.setBrush(QColor(T["text"]))
         p.drawEllipse(QRectF(x - 6, 5, 12, 12))
         p.setPen(QColor(T["muted"]))
-        p.drawText(self.PAD, 72, "00:00")
-        p.drawText(self.width() - self.PAD - 60, 72, fmt_t(self.duration)[:-4])
+        labels = QRectF(self.PAD, 60, max(0, self.width() - 1 - 2 * self.PAD), 14)
+        p.drawText(labels, Qt.AlignLeft | Qt.AlignBottom, "00:00")
+        p.drawText(labels, Qt.AlignRight | Qt.AlignBottom, fmt_t(self.duration)[:-4])
 
     def mousePressEvent(self, e):
         if self.duration <= 0:
@@ -701,7 +769,8 @@ class MainWindow(QWidget):
         spk = QLabel()
         spk.setPixmap(icon_pixmap("speaker", 20, T["muted"]))
         self.btn_full = icon_button("full", "Tela cheia", 38, T["text"])
-        self.btn_full.clicked.connect(lambda: self.cur and self.video.setFullScreen(True))
+        self.btn_full.clicked.connect(lambda: self.cur and self.video.toggle_fullscreen())
+        self.btn_full.setToolTip("Tela cheia (sair: Esc ou duplo clique)")
         self.btn_view = with_icon(QPushButton("  Ver só o trecho marcado"), "eye")
         self.btn_view.clicked.connect(self.view_selection)
         self.timeline = Timeline()
@@ -775,7 +844,7 @@ class MainWindow(QWidget):
         self.list_segs.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.list_segs.setTextElideMode(Qt.ElideMiddle)
         self.list_segs.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.list_segs.setMinimumHeight(110)
+        self.list_segs.setMinimumHeight(90)
         self.list_segs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.list_segs.itemDoubleClicked.connect(self.load_segment)
         self.list_segs.model().rowsMoved.connect(lambda *_: self.refresh_timeline_segments())
@@ -898,8 +967,8 @@ class MainWindow(QWidget):
         self.btn_start = with_icon(QPushButton("  INICIAR SALVAMENTO"), "download", T["on_amber"], 24)
         self.btn_start.setObjectName("primary")
         self.btn_start.setProperty("big", True)
-        self.btn_start.setStyleSheet(f"font-family:{DISPLAY}; font-size:14px; letter-spacing:0px; padding:8px 14px;")
-        self.btn_start.setMinimumHeight(50)
+        self.btn_start.setStyleSheet(f"font-family:{DISPLAY}; font-size:12px; letter-spacing:0px; padding:7px 12px;")
+        self.btn_start.setMinimumHeight(40)
         self.btn_start.clicked.connect(self.start_saving)
 
         c3, l3 = self.card("3", "Salvar")
@@ -923,11 +992,12 @@ class MainWindow(QWidget):
         l3.addWidget(self.btn_start)
 
         right = QVBoxLayout()
-        right.setSpacing(10)
+        right.setSpacing(8)
         right.addWidget(c1, 1)
         right.addWidget(c2)
         right.addWidget(c3)
         inner_p = QWidget()
+        inner_p.setObjectName("sidebar")
         inner_p.setLayout(right)
         panel = QScrollArea()
         panel.setWidget(inner_p)
@@ -1054,14 +1124,14 @@ class MainWindow(QWidget):
         f = QFrame()
         f.setObjectName("card")
         lay = QVBoxLayout(f)
-        lay.setContentsMargins(16, 12, 16, 14)
-        lay.setSpacing(8)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setSpacing(4)
         head = QHBoxLayout()
         head.setSpacing(10)
         n = QLabel(num)
         n.setObjectName("num")
         n.setAlignment(Qt.AlignCenter)
-        n.setFixedSize(30, 30)
+        n.setFixedSize(24, 24)
         h = QLabel(title.upper())
         h.setObjectName("sectionTitle")
         head.addWidget(n)
@@ -1680,6 +1750,8 @@ class MainWindow(QWidget):
         self.run_job(job, "Extraindo o áudio...", folder)
 
     def closeEvent(self, e):
+        if self.video.fullscreen_window is not None:
+            self.video.fullscreen_window.close()
         self.persist_preferences()
         if self.busy():
             self.worker.cancel()
