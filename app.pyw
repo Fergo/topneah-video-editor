@@ -49,6 +49,13 @@ from PySide6.QtWidgets import (
 
 import core
 from themes import DISPLAY, T, THEME_LABELS, activate_theme, build_style, build_dialog_style
+from localization import (
+    LANGUAGES, DEFAULT_LANGUAGE, set_language, tr,
+    LocalizedLabel as QLabel, LocalizedButton as QPushButton,
+    LocalizedComboBox as QComboBox, LocalizedDialog as QDialog,
+    LocalizedMessageBox as QMessageBox, LocalizedInputDialog as QInputDialog,
+    LocalizedFileDialog as QFileDialog,
+)
 
 APP_NAME = "Topneah Video APP"
 VIDEO_EXT = (".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".ts")
@@ -436,7 +443,7 @@ class SegList(QListWidget):
             p.drawPixmap(r.center().x() - 17, r.center().y() - 46, ic)
             p.setPen(QColor(T["muted"]))
             p.drawText(r.adjusted(0, 18, 0, 0), Qt.AlignCenter,
-                       "Seus trechos aparecerão aqui.\nMarque o começo e o fim no vídeo.")
+                       tr("Seus trechos aparecerão aqui.\nMarque o começo e o fim no vídeo."))
 
 
 PRESET_DETAILS_ROLE = int(Qt.UserRole) + 1
@@ -495,6 +502,18 @@ class TitleBar(QFrame):
         self.theme_selector.currentIndexChanged.connect(
             lambda _: window.apply_theme(self.theme_selector.currentData()))
         layout.addWidget(self.theme_selector)
+        layout.addSpacing(6)
+        self.language_selector = Dropdown()
+        self.language_selector.setObjectName("themeSelector")
+        self.language_selector.setAccessibleName("Idioma")
+        self.language_selector.setToolTip("Idioma do aplicativo")
+        for key, label in LANGUAGES.items():
+            self.language_selector.addItem(label, key, localize=False)
+        self.language_selector.setCurrentIndex(self.language_selector.findData(window.language))
+        self.language_selector.setFixedSize(115, 26)
+        self.language_selector.currentIndexChanged.connect(
+            lambda _: window.apply_language(self.language_selector.currentData()))
+        layout.addWidget(self.language_selector)
         layout.addSpacing(6)
         self.minimize = self.control("−", "Minimizar", window.showMinimized)
         self.maximize = self.control("□", "Maximizar", self.toggle_maximized)
@@ -732,6 +751,7 @@ class MainWindow(QWidget):
         self.cur: str | None = None
         self.kf: list[float] = []
         self.preferences = settings if settings is not None else QSettings("Topneah", "VideoAPP")
+        self.language = set_language(self.preferences.value("language", DEFAULT_LANGUAGE))
         self.saved_presets = self.load_saved_presets()
         self.out_dir = self.preferences.value("output_directory", "") or None
         self.worker: Worker | None = None
@@ -984,7 +1004,7 @@ class MainWindow(QWidget):
         lab_audio.setObjectName("value")
         self.cmb_audio = Dropdown()
         for lab in core.AUDIO_FORMATS:
-            self.cmb_audio.addItem(lab)
+            self.cmb_audio.addItem(lab, lab)
         self.btn_outdir = with_icon(QPushButton("  Salvar em: mesma pasta do vídeo"), "folder", T["muted"], 18)
         self.btn_outdir.setObjectName("ghost")
         self.btn_outdir.clicked.connect(self.choose_outdir)
@@ -1086,6 +1106,7 @@ class MainWindow(QWidget):
         self.select_preset(self.preferences.value("last_preset", "original"))
         self.update_output_directory_label()
         self.apply_theme(self.preferences.value("theme", "dark"))
+        self.apply_language(self.language)
         self.gpu_probe = GpuProbe()
         self.gpu_probe.ready.connect(self.on_gpu)
         self.gpu_probe.start()
@@ -1101,6 +1122,21 @@ class MainWindow(QWidget):
         ]
         self.update_resize_handles()
         self.update_buttons()
+
+    def apply_language(self, language):
+        self.language = set_language(language)
+        selector = self.title_bar.language_selector
+        selector.blockSignals(True)
+        selector.setCurrentIndex(selector.findData(self.language))
+        selector.blockSignals(False)
+        self.preferences.setValue("language", self.language)
+        self.preferences.sync()
+        self.update_buttons()
+        self.title_bar.sync_state()
+        self.chk_gpu.setAccessibleName(tr("Acelerar com a placa de vídeo (NVIDIA)"))
+        self.sw_audio.setAccessibleName(tr("Só o áudio"))
+        self.chk_gpu.setToolTip(self.lbl_gpu.text())
+        self.list_segs.viewport().update()
 
     def apply_theme(self, theme):
         theme = activate_theme(theme)
@@ -1284,7 +1320,7 @@ class MainWindow(QWidget):
                       f"Até {settings.height}p" if settings.height else "Resolução original")
         fps = f"Até {settings.fps} fps" if settings.fps else "FPS original"
         limit = f"{settings.max_mb:g} MB" if settings.max_mb else "Sem limite"
-        return f"{resolution} · {fps} · {core.QUALITY_LEVELS[settings.quality]} · {limit}"
+        return f"{resolution} · {fps} · {tr(core.QUALITY_LEVELS[settings.quality])} · {limit}"
 
     def set_preset_details(self, row, settings):
         details = self.preset_details(settings)
@@ -1301,7 +1337,7 @@ class MainWindow(QWidget):
                 settings = self.load_custom_settings()
             self.set_preset_details(self.cmb_preset.count() - 1, settings)
         for key, entry in self.saved_presets.items():
-            self.cmb_preset.addItem(entry["name"], key)
+            self.cmb_preset.addItem(entry["name"], key, localize=False)
             self.set_preset_details(self.cmb_preset.count() - 1, self.decode_preset(entry["settings"]))
         self.cmb_preset.blockSignals(False)
 
@@ -1351,7 +1387,7 @@ class MainWindow(QWidget):
         name = name.strip()
         if not ok or not name:
             return
-        if any(name.casefold() == title.casefold() for title, *_ in PRESETS.values()):
+        if any(name.casefold() == title.casefold() for title, *_ in PRESETS.values()) or any(name.casefold() == tr(title).casefold() for title, *_ in PRESETS.values()):
             QMessageBox.warning(self, APP_NAME, "Escolha um nome diferente dos presets padrão.")
             return
         key = next((key for key, entry in self.saved_presets.items()
@@ -1412,8 +1448,8 @@ class MainWindow(QWidget):
         hint.setWordWrap(True)
         layout.addWidget(hint)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("Aplicar")
-        buttons.button(QDialogButtonBox.Cancel).setText("Cancelar")
+        buttons.button(QDialogButtonBox.Ok).setText(tr("Aplicar"))
+        buttons.button(QDialogButtonBox.Cancel).setText(tr("Cancelar"))
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
@@ -1476,7 +1512,7 @@ class MainWindow(QWidget):
         w, h, fps = core.target_dims(info, s)
         kbps = core.plan_kbps(s, dur)
         lines = [f"<b>{w}×{h} · {fps:g} fps</b> · " +
-                 (f"até {s.max_mb:g} MB" if kbps else f"qualidade {core.QUALITY_LEVELS[s.quality].lower()}")]
+                 (f"até {s.max_mb:g} MB" if kbps else f"qualidade {tr(core.QUALITY_LEVELS[s.quality]).lower()}")]
         if kbps:
             lines.append(f"Vídeo com ≈ {kbps / 1000:.1f} Mbps para {dur:.0f} s")
             if kbps < w * h * fps * 0.03 / 1000:
@@ -1500,7 +1536,7 @@ class MainWindow(QWidget):
             msg = ("<b>Passo 1:</b> ache o começo do pedaço que você quer "
                    "(clique na barra ou use A/D) e aperte <b>Q</b>.")
         elif self.t_in is None:
-            msg = "Trecho guardado! Marque outro com <b>I</b> e <b>O</b>, ou escolha a qualidade e salve à direita."
+            msg = "Trecho guardado! Marque outro com <b>Q</b> e <b>E</b>, ou escolha a qualidade e salve à direita."
         elif self.t_out is None:
             msg = "<b>Passo 2:</b> agora ache o fim do pedaço e aperte <b>E</b>."
         else:
@@ -1564,7 +1600,7 @@ class MainWindow(QWidget):
                 continue
             self.infos[p] = info
             self.cmb_videos.blockSignals(True)
-            self.cmb_videos.addItem(f"{os.path.basename(p)}   ·   {info.describe()}", p)
+            self.cmb_videos.addItem(f"{os.path.basename(p)}   ·   {info.describe()}", p, localize=False)
             self.cmb_videos.blockSignals(False)
             first = first or p
         if first:
@@ -1793,14 +1829,14 @@ class MainWindow(QWidget):
             open_file_button = dialog.addButton("Abrir arquivo", QMessageBox.ActionRole)
         if ok and open_folder:
             dialog.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-            dialog.button(QMessageBox.Yes).setText("Abrir pasta")
+            dialog.button(QMessageBox.Yes).setText(tr("Abrir pasta"))
             dialog.button(QMessageBox.Yes).setObjectName("primary")
-            dialog.button(QMessageBox.No).setText("Fechar")
+            dialog.button(QMessageBox.No).setText(tr("Fechar"))
             dialog.setDefaultButton(QMessageBox.No)
             dialog.setEscapeButton(QMessageBox.No)
         else:
             dialog.setStandardButtons(QMessageBox.Ok)
-            dialog.button(QMessageBox.Ok).setText("Fechar")
+            dialog.button(QMessageBox.Ok).setText(tr("Fechar"))
             dialog.setEscapeButton(QMessageBox.Ok)
         for label in dialog.findChildren(QLabel):
             label.setWordWrap(True)
@@ -1896,7 +1932,7 @@ class MainWindow(QWidget):
             segs = [{"src": self.cur, "start": self.t_in, "end": self.t_out}]
         if not segs and self.cur:
             segs = [{"src": self.cur, "start": 0.0, "end": self.duration()}]
-        kind, ext = core.AUDIO_FORMATS[self.cmb_audio.currentText()]
+        kind, ext = core.AUDIO_FORMATS[self.cmb_audio.currentData()]
         folder = self.folder_for(segs[0]["src"])
         outs = []
 

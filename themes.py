@@ -104,6 +104,7 @@ QListWidget::item {{ padding: 6px 8px; border-radius: 3px; }}
 QListWidget::item:selected {{ background: {t['sel_bg']}; color: {t['text']}; border: 1px solid {t['amber_dark']}; }}
 QComboBox {{ background: {t['panel2']}; border: 1px solid {t['line']}; border-radius: 3px;
             padding: 7px 10px; font-weight: 600; }}
+QComboBox#themeSelector {{ padding: 1px 8px; }}
 QComboBox:hover {{ border-color: {t['amber_dark']}; }}
 QComboBox:disabled {{ color: #777777; background: #292929; }}
 QComboBox::drop-down {{ border: none; width: 26px; }}
