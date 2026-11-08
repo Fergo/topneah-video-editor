@@ -305,10 +305,12 @@ def build_dialog_style(theme="dark") -> str:
     palette = THEMES.get(theme, DARK_THEME)
     radius = 0 if theme == "win9x" else 6
     return build_style(theme) + f"""
-QMessageBox {{ background: {palette['panel']}; border: 1px solid {palette['line']};
+QDialog#resolutionDialog, QMessageBox {{ background: {palette['panel']}; border: 1px solid {palette['line']};
     border-radius: {radius}px; padding: 16px; }}
 QMessageBox QLabel {{ background: transparent; color: {palette['text']}; }}
 QMessageBox QLabel#qt_msgbox_label {{ font-size: 16px; font-weight: 600; }}
 QMessageBox QLabel#qt_msgbox_informativelabel {{ font-size: 13px; }}
 QMessageBox QPushButton {{ min-width: 90px; }}
+QDialog#resolutionDialog QSpinBox {{ background: {palette['track']}; color: {palette['text']};
+    border: 1px solid {palette['line']}; padding: 6px; min-width: 100px; }}
 """

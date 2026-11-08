@@ -371,6 +371,7 @@ class ExportSettings:
     max_mb: Optional[float] = None    # limite de tamanho final (MB)
     use_gpu: bool = True
     audio_kbps: int = 128
+    width: Optional[int] = None      # custom canvas width; height is exact when set
 
 
 def target_dims(info: VideoInfo, s: ExportSettings) -> tuple[int, int, float]:
@@ -380,6 +381,8 @@ def target_dims(info: VideoInfo, s: ExportSettings) -> tuple[int, int, float]:
     scale = min(1.0, s.height / short_side) if s.height else 1.0
     w = max(2, int(round(display_w * scale / 2) * 2))
     h = max(2, int(round(display_h * scale / 2) * 2))
+    if s.width is not None:
+        w, h = s.width, s.height
     fps = info.fps or 30.0
     if s.fps:
         fps = min(float(s.fps), fps)
@@ -425,6 +428,8 @@ def _video_codec_args(s: ExportSettings, kbps: Optional[int], gpu: bool) -> list
 
 def _vf(info: VideoInfo, s: ExportSettings) -> str:
     w, h, fps = target_dims(info, s)
+    if s.width is not None:
+        return _merge_vf(info, w, h, fps)
     # FFmpeg autorotates before filtering. Emit square pixels explicitly;
     # keeping the old SAR would make players stretch the scaled frame again.
     f = [f"scale={w}:{h}:flags=lanczos", "setsar=1"]

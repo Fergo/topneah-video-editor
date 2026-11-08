@@ -42,9 +42,9 @@ from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QFont, QIcon,
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
     QGridLayout, QHBoxLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem, QMessageBox, QProgressBar,
-    QPushButton, QScrollArea, QSizePolicy, QSlider, QStyledItemDelegate, QStyle, QStyleOptionComboBox, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStyledItemDelegate, QStyle, QStyleOptionComboBox, QVBoxLayout, QWidget,
 )
 
 import core
@@ -686,7 +686,7 @@ PRESETS = {
     "custom": ("Personalizado", "Você escolhe tudo", "gear", core.ExportSettings("encode")),
 }
 FILE_TAG = {"original": "", "zap_leve": "_whatsapp", "zap_hd": "_whatsapp-hd", "custom": "_custom"}
-RES_OPTS = [("Original", None), ("1080p", 1080), ("720p", 720), ("480p", 480)]
+RES_OPTS = [("Original", None), ("1080p", 1080), ("720p", 720), ("480p", 480), ("Customizado…", "custom")]
 FPS_OPTS = [("Original", None), ("60 fps", 60), ("30 fps", 30), ("24 fps", 24)]
 LIMIT_OPTS = [("Sem limite", None), ("8 MB", 8.0), ("16 MB (WhatsApp)", 16.0), ("25 MB", 25.0),
               ("50 MB", 50.0), ("100 MB", 100.0)]
@@ -907,6 +907,8 @@ class MainWindow(QWidget):
         self.btn_delete_preset.setObjectName("danger")
         self.btn_delete_preset.clicked.connect(self.delete_preset)
 
+        self.custom_dimensions = (1280, 720)
+        self.last_resolution = None
         self.cmb_res = Dropdown()
         self.cmb_fps = Dropdown()
         self.cmb_q = Dropdown()
@@ -923,8 +925,10 @@ class MainWindow(QWidget):
         self.lbl_gpu.setWordWrap(True)
         self.lbl_gpu.setBuddy(self.chk_gpu)
         self.chk_gpu.setChecked(True)
-        for c in (self.cmb_res, self.cmb_fps, self.cmb_q, self.cmb_limit):
+        for c in (self.cmb_fps, self.cmb_q, self.cmb_limit):
             c.currentIndexChanged.connect(self.on_custom_changed)
+        self.cmb_res.currentIndexChanged.connect(self.on_resolution_changed)
+        self.cmb_res.activated.connect(self.on_resolution_selected)
         self.chk_gpu.toggled.connect(self.on_custom_changed)
 
         self.custom = QWidget()
@@ -1238,7 +1242,11 @@ class MainWindow(QWidget):
     def decode_preset(data):
         settings = core.ExportSettings(**data)
         if (settings.mode not in ("copy", "encode")
-                or settings.height not in [v for _, v in RES_OPTS]
+                or (settings.width is None and settings.height not in (None, 1080, 720, 480))
+                or (settings.width is not None and (
+                    type(settings.width) is not int or type(settings.height) is not int
+                    or not 2 <= settings.width <= 8192 or not 2 <= settings.height <= 8192
+                    or settings.width % 2 or settings.height % 2))
                 or settings.fps not in [v for _, v in FPS_OPTS]
                 or settings.max_mb not in [v for _, v in LIMIT_OPTS]
                 or type(settings.quality) is not int or not 0 <= settings.quality <= 3
@@ -1272,7 +1280,8 @@ class MainWindow(QWidget):
     def preset_details(settings):
         if settings.mode == "copy":
             return "Resolução e FPS originais · Sem recompressão"
-        resolution = f"Até {settings.height}p" if settings.height else "Resolução original"
+        resolution = (f"{settings.width}×{settings.height}" if settings.width is not None else
+                      f"Até {settings.height}p" if settings.height else "Resolução original")
         fps = f"Até {settings.fps} fps" if settings.fps else "FPS original"
         limit = f"{settings.max_mb:g} MB" if settings.max_mb else "Sem limite"
         return f"{resolution} · {fps} · {core.QUALITY_LEVELS[settings.quality]} · {limit}"
@@ -1297,7 +1306,12 @@ class MainWindow(QWidget):
         self.cmb_preset.blockSignals(False)
 
     def apply_preset_settings(self, settings):
-        for control, value in ((self.cmb_res, settings.height), (self.cmb_fps, settings.fps),
+        if settings.width is not None:
+            self.custom_dimensions = (settings.width, settings.height)
+        resolution = "custom" if settings.width is not None else settings.height
+        self.last_resolution = resolution
+        self.update_custom_resolution_label()
+        for control, value in ((self.cmb_res, resolution), (self.cmb_fps, settings.fps),
                                (self.cmb_q, settings.quality), (self.cmb_limit, settings.max_mb)):
             control.blockSignals(True)
             control.setCurrentIndex(max(0, control.findData(value)))
@@ -1364,6 +1378,57 @@ class MainWindow(QWidget):
         self.select_preset("custom")
         self.status(f'Preset "{name}" excluído.')
 
+    def update_custom_resolution_label(self):
+        width, height = self.custom_dimensions
+        self.cmb_res.setItemText(self.cmb_res.findData("custom"), f"Customizado: {width}×{height}…")
+
+    def on_resolution_changed(self, *_):
+        if self.cmb_res.currentData() != "custom":
+            self.last_resolution = self.cmb_res.currentData()
+            self.on_custom_changed()
+
+    def on_resolution_selected(self, *_):
+        if self.cmb_res.currentData() != "custom":
+            return
+        dialog = QDialog(self)
+        dialog.setObjectName("resolutionDialog")
+        dialog.setWindowTitle("Tamanho customizado")
+        dialog.setStyleSheet(build_dialog_style(self.theme))
+        layout = QVBoxLayout(dialog)
+        fields = QGridLayout()
+        width, height = QSpinBox(), QSpinBox()
+        for control, value in zip((width, height), self.custom_dimensions):
+            control.setRange(2, 8192)
+            control.setSingleStep(2)
+            control.setSuffix(" px")
+            control.setValue(value)
+        fields.addWidget(QLabel("Largura"), 0, 0)
+        fields.addWidget(width, 1, 0)
+        fields.addWidget(QLabel("Altura"), 0, 1)
+        fields.addWidget(height, 1, 1)
+        layout.addLayout(fields)
+        hint = QLabel("A proporção do vídeo será preservada, com barras se necessário. "
+                      "Valores ímpares serão ajustados para o próximo número par.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Aplicar")
+        buttons.button(QDialogButtonBox.Cancel).setText("Cancelar")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() == QDialog.Accepted:
+            self.custom_dimensions = (width.value() + width.value() % 2,
+                                      height.value() + height.value() % 2)
+            self.last_resolution = "custom"
+            self.update_custom_resolution_label()
+            self.on_custom_changed()
+        else:
+            self.cmb_res.blockSignals(True)
+            self.cmb_res.setCurrentIndex(self.cmb_res.findData(self.last_resolution))
+            self.cmb_res.blockSignals(False)
+        dialog.deleteLater()
+
     def on_custom_changed(self, *_):
         if self.preset != "custom":
             self.select_preset("custom")
@@ -1374,10 +1439,12 @@ class MainWindow(QWidget):
     def build_settings(self) -> core.ExportSettings:
         if self.is_copy():
             return core.ExportSettings("copy")
+        custom = self.cmb_res.currentData() == "custom"
         return core.ExportSettings(
-            "encode", self.cmb_res.currentData(), self.cmb_fps.currentData(),
+            "encode", self.custom_dimensions[1] if custom else self.cmb_res.currentData(), self.cmb_fps.currentData(),
             self.cmb_q.currentData(), self.cmb_limit.currentData(),
             self.chk_gpu.isChecked(),
+            width=self.custom_dimensions[0] if custom else None,
         )
 
     def selection_duration(self) -> float:
