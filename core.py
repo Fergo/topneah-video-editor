@@ -78,18 +78,30 @@ class VideoInfo:
     pix_fmt: str
     vbitrate: int
     audio: list[AudioTrack] = field(default_factory=list)
+    rotation: float = 0.0
+    sample_aspect_ratio: float = 1.0
+
+    def display_dimensions(self) -> tuple[float, float]:
+        """Dimensions after pixel aspect correction and FFmpeg autorotation."""
+        width, height = self.width * self.sample_aspect_ratio, float(self.height)
+        if round(self.rotation / 90) % 2:
+            width, height = height, width
+        return width, height
+
 
     def signature(self) -> tuple:
         """Parametros que precisam ser iguais para juntar sem recodificar."""
         a = self.audio[0] if self.audio else None
         return (
             self.vcodec, self.width, self.height, round(self.fps, 2), self.pix_fmt,
+            round(self.rotation % 360, 2), round(self.sample_aspect_ratio, 6),
             (a.codec, a.channels, a.sample_rate) if a else None,
         )
 
     def describe(self) -> str:
         a = self.audio[0] if self.audio else None
-        s = f"{self.vcodec.upper()} {self.width}x{self.height} {self.fps:.0f}fps"
+        w, h = self.display_dimensions()
+        s = f"{self.vcodec.upper()} {w:g}x{h:g} {self.fps:.0f}fps"
         if self.vbitrate:
             s += f" {self.vbitrate / 1e6:.1f} Mbps"
         if a:
@@ -103,6 +115,9 @@ def _frac(s: str) -> float:
     try:
         if "/" in s:
             n, d = s.split("/")
+            return float(n) / float(d) if float(d) else 0.0
+        if ":" in s:
+            n, d = s.split(":")
             return float(n) / float(d) if float(d) else 0.0
         return float(s)
     except Exception:
@@ -127,11 +142,17 @@ def probe(path: str) -> VideoInfo:
                 int(s.get("sample_rate", 48000)), int(s.get("bit_rate", 0) or 0),
                 s.get("tags", {}).get("title", ""),
             ))
+        rotation = float(v.get("tags", {}).get("rotate", 0) or 0)
+        for side_data in v.get("side_data_list", []):
+            if "rotation" in side_data:
+                rotation = float(side_data["rotation"])
+                break
+        sar = _frac(v.get("sample_aspect_ratio", "1:1")) or 1.0
         return VideoInfo(
             path, float(d["format"].get("duration", v.get("duration", 0))),
             v.get("codec_name", "?"), int(v["width"]), int(v["height"]),
             _frac(v.get("avg_frame_rate", "0")) or _frac(v.get("r_frame_rate", "0")),
-            v.get("pix_fmt", "?"), int(v.get("bit_rate", 0) or 0), audio,
+            v.get("pix_fmt", "?"), int(v.get("bit_rate", 0) or 0), audio, rotation, sar,
         )
     # --- sem ffprobe: le a saida de "ffmpeg -i"
     r = _run([find_ffmpeg(), "-hide_banner", "-i", path])
@@ -149,9 +170,15 @@ def probe(path: str) -> VideoInfo:
     for i, am in enumerate(re.finditer(r"Audio: (\w+).*?, (\d+) Hz, (\w+)", t)):
         ch = 1 if am[3] == "mono" else 2
         audio.append(AudioTrack(i, am[1], ch, int(am[2]), 0))
+    rotation_match = re.search(r"rotation of\s+(-?[\d.]+) degrees", t)
+    if not rotation_match:
+        rotation_match = re.search(r"rotate\s*:\s*(-?[\d.]+)", t)
+    rotation = float(rotation_match[1]) if rotation_match else 0.0
+    sar_match = re.search(r"\bSAR (\d+:\d+)", vm[0] + t[vm.end():].split("\n", 1)[0])
+    sar = (_frac(sar_match[1]) if sar_match else 1.0) or 1.0
     return VideoInfo(path, dur, vm[1], int(vm[3]), int(vm[4]),
                      float(fm[1]) if fm else 30.0, vm[2],
-                     int(bm[1]) * 1000 if bm else 0, audio)
+                     int(bm[1]) * 1000 if bm else 0, audio, rotation, sar)
 
 
 def _mp4_keyframes(path: str) -> list[float]:
@@ -338,7 +365,7 @@ _CQ_NVENC = [17, 21, 25, 29]
 class ExportSettings:
     """mode='copy' = sem recodificar (qualidade identica). 'encode' = recodifica."""
     mode: str = "copy"
-    height: Optional[int] = None      # 1080 / 720 / 480 (nunca aumenta o video)
+    height: Optional[int] = None      # 1080 / 720 / 480: limite do lado menor; nunca amplia
     fps: Optional[int] = None         # 60 / 30 / 24 (nunca aumenta o fps)
     quality: int = 1                  # indice em QUALITY_LEVELS
     max_mb: Optional[float] = None    # limite de tamanho final (MB)
@@ -347,9 +374,12 @@ class ExportSettings:
 
 
 def target_dims(info: VideoInfo, s: ExportSettings) -> tuple[int, int, float]:
-    h = info.height if not s.height else min(s.height, info.height)
-    w = int(round(info.width * h / info.height / 2) * 2)
-    h = int(round(h / 2) * 2)
+    # Resolution presets constrain the shorter side in either orientation.
+    display_w, display_h = info.display_dimensions()
+    short_side = min(display_w, display_h)
+    scale = min(1.0, s.height / short_side) if s.height else 1.0
+    w = max(2, int(round(display_w * scale / 2) * 2))
+    h = max(2, int(round(display_h * scale / 2) * 2))
     fps = info.fps or 30.0
     if s.fps:
         fps = min(float(s.fps), fps)
@@ -395,13 +425,22 @@ def _video_codec_args(s: ExportSettings, kbps: Optional[int], gpu: bool) -> list
 
 def _vf(info: VideoInfo, s: ExportSettings) -> str:
     w, h, fps = target_dims(info, s)
-    f = []
-    if (w, h) != (info.width, info.height):
-        f.append(f"scale={w}:{h}:flags=lanczos")
+    # FFmpeg autorotates before filtering. Emit square pixels explicitly;
+    # keeping the old SAR would make players stretch the scaled frame again.
+    f = [f"scale={w}:{h}:flags=lanczos", "setsar=1"]
     if fps + 0.5 < (info.fps or fps):
         f.append(f"fps={fps:g}")
     f.append("format=yuv420p")
     return ",".join(f)
+
+
+def _merge_vf(info: VideoInfo, width: int, height: int, fps: int) -> str:
+    display_w, display_h = info.display_dimensions()
+    scale = min(width / display_w, height / display_h)
+    fit_w = min(width, max(2, int(round(display_w * scale / 2) * 2)))
+    fit_h = min(height, max(2, int(round(display_h * scale / 2) * 2)))
+    return (f"scale={fit_w}:{fit_h}:flags=lanczos,setsar=1,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps},format=yuv420p")
 
 
 # --------------------------------------------------------------------------
@@ -544,8 +583,7 @@ def merge(clips: list[Clip], out: str, settings: Optional[ExportSettings] = None
                         args += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
                     args += ["-t", _fmt(duration), "-map", "0:v:0", "-map",
                              "0:a:0" if infos[c.src].audio else "1:a:0",
-                             "-vf", f"scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos,"
-                             f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps},format=yuv420p",
+                             "-vf", _merge_vf(infos[c.src], w, h, fps),
                              *_video_codec_args(es, kbps, gpu), "-c:a", "aac",
                              "-b:a", f"{es.audio_kbps}k", "-ar", "48000", "-ac", "2", part]
                     _run_ffmpeg(args, duration,

@@ -811,6 +811,10 @@ class MainWindow(QWidget):
         self.btn_add = with_icon(QPushButton("  Guardar este trecho"), "plus", T["amber2"])
         self.btn_add.setObjectName("outline")
         self.btn_add.clicked.connect(self.add_segment)
+        self.btn_add_whole = QPushButton("+ Tudo")
+        self.btn_add_whole.setObjectName("outline")
+        self.btn_add_whole.setToolTip("Adicionar o vídeo inteiro à lista de trechos")
+        self.btn_add_whole.clicked.connect(self.add_whole_video)
         caption = QLabel("Atalhos:  Espaço = play/pause  |  Q = início  |  E = fim  |  W / Enter = guardar  |  "
                          "A / D = 1 segundo  |  Shift + A / D = quadro a quadro")
         caption.setObjectName("caption")
@@ -842,6 +846,7 @@ class MainWindow(QWidget):
         r2.addWidget(self.lbl_len)
         r2.addStretch()
         r2.addWidget(self.btn_add)
+        r2.addWidget(self.btn_add_whole)
         cl.addLayout(r2)
         cl.addWidget(caption)
 
@@ -1068,7 +1073,7 @@ class MainWindow(QWidget):
         sc(Qt.Key_D, lambda: self.step(1, seconds=True))
         sc("Shift+A", lambda: self.step(-1))
         sc("Shift+D", lambda: self.step(1))
-        for b in (self.btn_in, self.btn_out, self.btn_add, self.btn_view):
+        for b in (self.btn_in, self.btn_out, self.btn_add, self.btn_add_whole, self.btn_view):
             b.setFocusPolicy(Qt.NoFocus)
 
         self.cmb_preset.currentIndexChanged.connect(
@@ -1446,6 +1451,7 @@ class MainWindow(QWidget):
         audio_only = self.sw_audio.isChecked()
         marks = have and self.t_in is not None and self.t_out is not None
         self.btn_add.setEnabled(marks)
+        self.btn_add_whole.setEnabled(have and self.duration() > 0)
         self.btn_view.setEnabled(marks)
         self.btn_cut.setEnabled(not audio_only)
         self.btn_merge.setEnabled(not audio_only)
@@ -1605,20 +1611,29 @@ class MainWindow(QWidget):
         self.player.play()
 
     # ------------------------------------------------------------ trechos
-    def add_segment(self):
-        if not (self.cur and self.t_in is not None and self.t_out is not None):
-            return
+    def append_segment(self, start: float, end: float):
         n = self.list_segs.count() + 1
         it = QListWidgetItem()
         it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
         it.setCheckState(Qt.Checked)
-        it.setData(Qt.UserRole, {"src": self.cur, "start": self.t_in, "end": self.t_out})
-        it.setText(self._seg_text(self.cur, self.t_in, self.t_out, n))
+        it.setData(Qt.UserRole, {"src": self.cur, "start": start, "end": end})
+        it.setText(self._seg_text(self.cur, start, end, n))
         self.list_segs.addItem(it)
+        self.status(f"Trecho {n} guardado.")
+
+    def add_segment(self):
+        if not (self.cur and self.t_in is not None and self.t_out is not None):
+            return
+        self.append_segment(self.t_in, self.t_out)
         self.t_in = self.t_out = None
         self.refresh_marks()
         self.refresh_timeline_segments()
-        self.status(f"Trecho {n} guardado.")
+
+    def add_whole_video(self):
+        if not self.cur or self.duration() <= 0:
+            return
+        self.append_segment(0.0, self.duration())
+        self.refresh_timeline_segments()
 
     @staticmethod
     def _seg_text(src, a, b, n):
@@ -1695,7 +1710,8 @@ class MainWindow(QWidget):
         else:
             self.export_cuts()
 
-    def show_export_result(self, message: str, ok: bool, open_folder: str | None):
+    def show_export_result(self, message: str, ok: bool, open_folder: str | None,
+                           output_files: list[str] | None = None):
         dialog = QMessageBox(self)
         dialog.setOption(QMessageBox.Option.DontUseNativeDialog, True)
         dialog.setWindowFlag(Qt.FramelessWindowHint, True)
@@ -1704,6 +1720,10 @@ class MainWindow(QWidget):
         dialog.setText("Salvamento concluído" if ok else "Não foi possível salvar")
         dialog.setInformativeText(message)
         dialog.setStyleSheet(build_dialog_style(self.theme))
+        output_files = output_files or []
+        open_file_button = None
+        if ok and len(output_files) == 1:
+            open_file_button = dialog.addButton("Abrir arquivo", QMessageBox.ActionRole)
         if ok and open_folder:
             dialog.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
             dialog.button(QMessageBox.Yes).setText("Abrir pasta")
@@ -1718,11 +1738,20 @@ class MainWindow(QWidget):
         for label in dialog.findChildren(QLabel):
             label.setWordWrap(True)
         result = dialog.exec()
+        open_file = open_file_button is not None and dialog.clickedButton() == open_file_button
         dialog.deleteLater()
-        if ok and open_folder and result == QMessageBox.Yes:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(open_folder))
+        if ok and open_file:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(output_files[0]))
+        elif ok and open_folder and result == QMessageBox.Yes:
+            if output_files and sys.platform == "win32":
+                import subprocess
+                subprocess.Popen(["explorer.exe", "/select,", os.path.normpath(os.path.abspath(output_files[-1]))],
+                                 creationflags=subprocess.CREATE_NO_WINDOW)
+            else:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(open_folder))
 
-    def run_job(self, job, label: str, open_folder: str | None):
+    def run_job(self, job, label: str, open_folder: str | None,
+                output_files: list[str] | None = None):
         if self.busy():
             return
         self.progress.setValue(0)
@@ -1738,7 +1767,7 @@ class MainWindow(QWidget):
             if ok:
                 self.progress.setValue(1000)
             self.update_buttons()
-            self.show_export_result(msg, ok, open_folder)
+            self.show_export_result(msg, ok, open_folder, output_files if ok else None)
 
         w.done.connect(lambda m: finish(m, True))
         w.failed.connect(lambda m: finish(m, False))
@@ -1761,7 +1790,7 @@ class MainWindow(QWidget):
                          cb=lambda f, i=i: prog((i + f) / total), cancel=cancel)
                 outs.append(out)
             return f"{len(outs)} arquivo(s) salvo(s) em {os.path.dirname(outs[-1])}"
-        self.run_job(job, "Salvando os trechos...", folder)
+        self.run_job(job, "Salvando os trechos...", folder, outs)
 
     def export_merge(self):
         segs = self.checked_segments()
@@ -1786,10 +1815,13 @@ class MainWindow(QWidget):
                     return
                 reencode = True
 
+        outs = []
+
         def job(prog, cancel):
             lossless = core.merge(clips, out, settings, reencode, cb=prog, cancel=cancel)
+            outs.append(out)
             return f"Vídeo salvo ({'sem perda' if lossless else 'recodificado'}): {out}"
-        self.run_job(job, "Juntando os trechos...", folder)
+        self.run_job(job, "Juntando os trechos...", folder, outs)
 
     def export_audio(self):
         segs = self.checked_segments()          # trechos marcados -> marca atual -> video todo
@@ -1799,6 +1831,7 @@ class MainWindow(QWidget):
             segs = [{"src": self.cur, "start": 0.0, "end": self.duration()}]
         kind, ext = core.AUDIO_FORMATS[self.cmb_audio.currentText()]
         folder = self.folder_for(segs[0]["src"])
+        outs = []
 
         def job(prog, cancel):
             total, last = len(segs), ""
@@ -1807,9 +1840,10 @@ class MainWindow(QWidget):
                 out = core.unique_path(self.folder_for(s["src"]), f"{stem}_audio{i + 1}", "." + ext)
                 core.extract_audio(s["src"], s["start"], s["end"], out, kind,
                                    cb=lambda f, i=i: prog((i + f) / total), cancel=cancel)
+                outs.append(out)
                 last = out
             return f"{total} áudio(s) salvo(s) em {os.path.dirname(last)}"
-        self.run_job(job, "Extraindo o áudio...", folder)
+        self.run_job(job, "Extraindo o áudio...", folder, outs)
 
     def closeEvent(self, e):
         if self.video.fullscreen_window is not None:
